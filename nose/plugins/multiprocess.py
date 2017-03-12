@@ -215,7 +215,13 @@ class MultiProcess(Plugin):
                           " their tests are done, this helps control memory "
                           "leaks from killing the system. "
                           "[NOSE_PROCESS_RESTARTWORKER]")
-
+        parser.add_option("--process-prefork", action="store_true",
+                          default=env.get('NOSE_PROCESS_PREFORK', False),
+                          dest="multiprocess_prefork",
+                          help="If set, will create the worker processes up front, to avoid potential"
+                          " issues with sharing of sockets, e.g. existing database and HTTP connections."
+                          " Currently not compatible with --process-restart-worker"
+                          "[NOSE_PROCESS_PREFORK]")
     def configure(self, options, config):
         """
         Configure plugin.
@@ -255,6 +261,9 @@ class MultiProcess(Plugin):
             self.config.multiprocess_timeout = t
             r = int(options.multiprocess_restartworker)
             self.config.multiprocess_restartworker = r
+            s = self.config.multiprocess_prefork = bool(options.multiprocess_prefork)
+            if r and s:
+                raise ValueError("Only one of process-restartworker and process-prefork is supported.")
             self.status['active'] = True
 
     def prepareTestLoader(self, loader):
@@ -367,19 +376,29 @@ class MultiProcessTestRunner(TextTestRunner):
         tasks = []
         completed = []
         workers = []
+
         to_teardown = []
         shouldStop = Event()
 
         result = self._makeResult()
         start = time.time()
 
+        if self.config.multiprocess_prefork:
+            log.debug("Starting %s workers", self.config.multiprocess_workers)
+            for i in range(self.config.multiprocess_workers):
+                p = self.startProcess(i, testQueue, resultQueue, shouldStop, result)
+                workers.append(p)
+                log.debug("Started worker process %s", i + 1)
+            time.sleep(4)
+
         self.collect(test, testQueue, tasks, to_teardown, result)
 
-        log.debug("Starting %s workers", self.config.multiprocess_workers)
-        for i in range(self.config.multiprocess_workers):
-            p = self.startProcess(i, testQueue, resultQueue, shouldStop, result)
-            workers.append(p)
-            log.debug("Started worker process %s", i+1)
+        if not self.config.multiprocess_prefork:
+            log.debug("Starting %s workers", self.config.multiprocess_workers)
+            for i in range(self.config.multiprocess_workers):
+                p = self.startProcess(i, testQueue, resultQueue, shouldStop, result)
+                workers.append(p)
+                log.debug("Started worker process %s", i+1)
 
         total_tasks = len(tasks)
         # need to keep track of the next time to check for timeouts in case
@@ -648,6 +667,7 @@ def runner(ix, testQueue, resultQueue, currentaddr, currentstart,
            keyboardCaught, shouldStop, loaderClass, resultClass, config):
     try:
         try:
+            sys.stderr.write("I({})'ve been started!\n".format(os.getpid()))
             return __runner(ix, testQueue, resultQueue, currentaddr, currentstart,
                     keyboardCaught, shouldStop, loaderClass, resultClass, config)
         except KeyboardInterrupt:
